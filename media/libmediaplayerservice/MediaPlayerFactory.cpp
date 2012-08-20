@@ -30,12 +30,18 @@
 #include "TestPlayerStub.h"
 #include "StagefrightPlayer.h"
 #include "nuplayer/NuPlayerDriver.h"
+#include "CedarPlayer.h"
+#include "CedarAPlayerWrapper.h"
+#include "SimpleMediaFormatProbe.h"
 
 namespace android {
 
 Mutex MediaPlayerFactory::sLock;
 MediaPlayerFactory::tFactoryMap MediaPlayerFactory::sFactoryMap;
 bool MediaPlayerFactory::sInitComplete = false;
+
+extern int MovAudioOnlyDetect0(const char *url);
+extern int MovAudioOnlyDetect1(int fd, int64_t offset, int64_t length);
 
 status_t MediaPlayerFactory::registerFactory_l(IFactory* factory,
                                                player_type type) {
@@ -61,13 +67,15 @@ status_t MediaPlayerFactory::registerFactory_l(IFactory* factory,
 }
 
 player_type MediaPlayerFactory::getDefaultPlayerType() {
+#if 1
+	return CEDARX_PLAYER;
+#else
     char value[PROPERTY_VALUE_MAX];
     if (property_get("media.stagefright.use-nuplayer", value, NULL)
             && (!strcmp("1", value) || !strcasecmp("true", value))) {
         return NU_PLAYER;
     }
-
-    return STAGEFRIGHT_PLAYER;
+#endif
 }
 
 status_t MediaPlayerFactory::registerFactory(IFactory* factory,
@@ -174,10 +182,13 @@ class StagefrightPlayerFactory :
                                int fd,
                                int64_t offset,
                                int64_t length,
-                               float curScore) {
-        char buf[20];
+                               float curScore,
+                               bool check_cedar) {
+        int r_size;
+	    int file_format;
+        char buf[2048];
         lseek(fd, offset, SEEK_SET);
-        read(fd, buf, sizeof(buf));
+        r_size = read(fd, buf, sizeof(buf));
         lseek(fd, offset, SEEK_SET);
 
         long ident = *((long*)buf);
@@ -185,6 +196,92 @@ class StagefrightPlayerFactory :
         // Ogg vorbis?
         if (ident == 0x5367674f) // 'OggS'
             return 1.0;
+
+        static const float kOurScore = 0.6;
+
+        if (kOurScore <= curScore)
+            return 0.0;
+
+		if (check_cedar) {
+			file_format = audio_format_detect((unsigned char*)buf, r_size);
+			ALOGV("getPlayerType: %d",file_format);
+
+			if (file_format == MEDIA_FORMAT_3GP) {
+				int audio_only;
+				audio_only = MovAudioOnlyDetect1(fd, offset, length);
+				lseek(fd, offset, SEEK_SET);
+
+				return audio_only ? kOurScore : 0.0;
+			}
+			else {
+				if(file_format < MEDIA_FORMAT_STAGEFRIGHT_MAX && file_format > MEDIA_FORMAT_STAGEFRIGHT_MIN){
+					ALOGV("use STAGEFRIGHT_PLAYER");
+					return kOurScore;
+				}
+				else if(file_format < MEDIA_FORMAT_CEDARA_MAX && file_format > MEDIA_FORMAT_CEDARA_MIN){
+					//ALOGV("use CEDARA_PLAYER");
+					return 0.0;
+				}
+				else if(file_format < MEDIA_FORMAT_CEDARX_MAX && file_format > MEDIA_FORMAT_CEDARX_MIN){
+					//ALOGV("use CEDARX_PLAYER");
+					return 0.0;
+				}
+			}
+		}													       
+
+        return 0.3;
+    }
+
+    virtual float scoreFactory(const sp<IMediaPlayer>& client,
+                               const char* url,
+                               float curScore) {
+        static const char* const FILE_EXTS[] = { ".ogg",
+                                                 ".mp3",
+                                                 ".wav",
+                                                 ".amr",
+                                                 ".flac",
+                                                 ".m4a",
+                                                 ".m4r",
+                                                 ".out" };
+        static const char* const MP4A_FILE_EXTS[] = { ".m4a",
+                                                 ".m4r",
+                                                 ".3gpp" };
+        static const float kOurScore = 0.8;
+
+        if (kOurScore <= curScore)
+            return 0.0;
+
+		if (!strncasecmp("http://", url, 7) || !strncasecmp("https://", url, 8)) {
+			if((strpos = strrchr(url,'?')) != NULL) {
+				for (int i = 0; i < NELEM(FILE_EXTS); ++i) {
+						int len = strlen(FILE_EXTS[i]);
+							if (!strncasecmp(strpos -len, FILE_EXTS[i], len)) {
+								return kOurScore;
+							}
+					}
+			}
+		}
+
+        static const float kOurScore2 = 0.2;
+        if (kOurScore2 <= curScore)
+            return 0.0;
+
+		//MP4 AUDIO ONLY DETECT
+        int lenURL = strlen(url);
+        int len;
+        int start;
+		if (strstr(url, "://") == NULL) {
+			for (int i = 0; i < NELEM(MP4A_FILE_EXTS); ++i) {
+				len = strlen(MP4A_FILE_EXTS[i]);
+				start = lenURL - len;
+				if (start > 0) {
+					if (!strncasecmp(url + start, MP4A_FILE_EXTS[i], len)) {
+						if (MovAudioOnlyDetect0(url))
+							return kOurScore2;
+					}
+				}
+			}
+		}
 
         return 0.0;
     }
@@ -204,7 +301,7 @@ class NuPlayerFactory : public MediaPlayerFactory::IFactory {
 
         if (kOurScore <= curScore)
             return 0.0;
-
+#if 0
         if (!strncasecmp("http://", url, 7)
                 || !strncasecmp("https://", url, 8)) {
             size_t len = strlen(url);
@@ -220,6 +317,7 @@ class NuPlayerFactory : public MediaPlayerFactory::IFactory {
         if (!strncasecmp("rtsp://", url, 7)) {
             return kOurScore;
         }
+#endif
 
         return 0.0;
     }
@@ -241,7 +339,6 @@ class SonivoxPlayerFactory : public MediaPlayerFactory::IFactory {
     virtual float scoreFactory(const sp<IMediaPlayer>& client,
                                const char* url,
                                float curScore) {
-        static const float kOurScore = 0.4;
         static const char* const FILE_EXTS[] = { ".mid",
                                                  ".midi",
                                                  ".smf",
@@ -251,14 +348,34 @@ class SonivoxPlayerFactory : public MediaPlayerFactory::IFactory {
                                                  ".rtttl",
                                                  ".rtx",
                                                  ".ota" };
+        static const float kOurScore = 0.8;
+
         if (kOurScore <= curScore)
+            return 0.0;
+
+		if (!strncasecmp("http://", url, 7) || !strncasecmp("https://", url, 8)) {
+			if((strpos = strrchr(url,'?')) != NULL) {
+				for (int i = 0; i < NELEM(FILE_EXTS); ++i) {
+						int len = strlen(FILE_EXTS[i]);
+							if (!strncasecmp(strpos -len, FILE_EXTS[i], len)) {
+								return kOurScore;
+							}
+					}
+			}
+		}
+
+        static const float kOurScore2 = 0.4;
+
+        if (kOurScore2 <= curScore)
             return 0.0;
 
         // use MidiFile for MIDI extensions
         int lenURL = strlen(url);
+        int len;
+        int start;
         for (int i = 0; i < NELEM(FILE_EXTS); ++i) {
-            int len = strlen(FILE_EXTS[i]);
-            int start = lenURL - len;
+            len = strlen(FILE_EXTS[i]);
+            start = lenURL - len;
             if (start > 0) {
                 if (!strncasecmp(url + start, FILE_EXTS[i], len)) {
                     return kOurScore;
@@ -273,7 +390,8 @@ class SonivoxPlayerFactory : public MediaPlayerFactory::IFactory {
                                int fd,
                                int64_t offset,
                                int64_t length,
-                               float curScore) {
+                               float curScore,
+                               bool check_cedar) {
         static const float kOurScore = 0.8;
 
         if (kOurScore <= curScore)
@@ -318,8 +436,136 @@ class TestPlayerFactory : public MediaPlayerFactory::IFactory {
     }
 
     virtual sp<MediaPlayerBase> createPlayer() {
-        ALOGV("Create Test Player stub");
+        ALOGV("Create CedarAPlayer");
         return new TestPlayerStub();
+    }
+};
+
+class CedarXPlayerFactory : public MediaPlayerFactory::IFactory {
+  public:
+    virtual float scoreFactory(const sp<IMediaPlayer>& client,
+                               int fd,
+                               int64_t offset,
+                               int64_t length,
+                               float curScore,
+                               bool check_cedar) {
+        static const float kOurScore = 0.6;
+
+        if (kOurScore <= curScore)
+            return 0.0;
+
+		if (check_cedar) {
+			file_format = audio_format_detect((unsigned char*)buf, r_size);
+			ALOGV("getPlayerType: %d",file_format);
+
+			if (file_format == MEDIA_FORMAT_3GP) {
+				int audio_only;
+				audio_only = MovAudioOnlyDetect1(fd, offset, length);
+				lseek(fd, offset, SEEK_SET);
+
+				return audio_only ? 0.0 : kOurScore;
+			}
+			else
+			{
+				if(file_format < MEDIA_FORMAT_STAGEFRIGHT_MAX && file_format > MEDIA_FORMAT_STAGEFRIGHT_MIN){
+					//ALOGV("use STAGEFRIGHT_PLAYER");
+					return 0.0;
+				}
+				else if(file_format < MEDIA_FORMAT_CEDARA_MAX && file_format > MEDIA_FORMAT_CEDARA_MIN){
+					//ALOGV("use CEDARA_PLAYER");
+					return 0.0;
+				}
+				else if(file_format < MEDIA_FORMAT_CEDARX_MAX && file_format > MEDIA_FORMAT_CEDARX_MIN){
+					ALOGV("use CEDARX_PLAYER");
+					return kOurScore;
+				}
+			}
+		}
+        return 0.0;
+    }
+
+    virtual sp<MediaPlayerBase> createPlayer() {
+        ALOGV("Create CedarXPlayer");
+        return new CedarPlayer();
+    }
+};
+
+class CedarAPlayerFactory : public MediaPlayerFactory::IFactory {
+  public:
+    virtual float scoreFactory(const sp<IMediaPlayer>& client,
+                               int fd,
+                               int64_t offset,
+                               int64_t length,
+                               float curScore,
+                               bool check_cedar) {
+        static const float kOurScore = 0.6;
+
+        if (kOurScore <= curScore)
+            return 0.0;
+
+		if (check_cedar) {
+			file_format = audio_format_detect((unsigned char*)buf, r_size);
+			ALOGV("getPlayerType: %d",file_format);
+
+			if (file_format == MEDIA_FORMAT_3GP) {
+				int audio_only;
+				audio_only = MovAudioOnlyDetect1(fd, offset, length);
+				lseek(fd, offset, SEEK_SET);
+
+				return audio_only ? 0.0 : 0.0;
+			}
+			else
+			{
+				if(file_format < MEDIA_FORMAT_STAGEFRIGHT_MAX && file_format > MEDIA_FORMAT_STAGEFRIGHT_MIN){
+					//ALOGV("use STAGEFRIGHT_PLAYER");
+					return 0.0;
+				}
+				else if(file_format < MEDIA_FORMAT_CEDARA_MAX && file_format > MEDIA_FORMAT_CEDARA_MIN){
+					ALOGV("use CEDARA_PLAYER");
+					return kOurScore;
+				}
+				else if(file_format < MEDIA_FORMAT_CEDARX_MAX && file_format > MEDIA_FORMAT_CEDARX_MIN){
+					//ALOGV("use CEDARX_PLAYER");
+					return 0.0;
+				}
+			}
+		}
+
+        return 0.0;
+    }
+
+    virtual float scoreFactory(const sp<IMediaPlayer>& client,
+                               const char* url,
+                               float curScore) {
+        static const char* const FILE_EXTS[] = { ".ape",
+                                                 ".ac3",
+                                                 ".dts",
+                                                 ".wma",
+                                                 ".aac",
+                                                 ".mp2",
+                                                 ".mp1" };
+        static const float kOurScore = 0.8;
+
+        if (kOurScore <= curScore)
+            return 0.0;
+
+		if (!strncasecmp("http://", url, 7) || !strncasecmp("https://", url, 8)) {
+			if((strpos = strrchr(url,'?')) != NULL) {
+				for (int i = 0; i < NELEM(FILE_EXTS); ++i) {
+						int len = strlen(FILE_EXTS[i]);
+							if (!strncasecmp(strpos -len, FILE_EXTS[i], len)) {
+								return kOurScore;
+							}
+					}
+			}
+		}
+
+    return 0.0;
+    }
+
+    virtual sp<MediaPlayerBase> createPlayer() {
+        ALOGV("Create CedarAPlayer");
+        return new CedarAPlayerWrapper();
     }
 };
 
@@ -333,6 +579,8 @@ void MediaPlayerFactory::registerBuiltinFactories() {
     registerFactory_l(new NuPlayerFactory(), NU_PLAYER);
     registerFactory_l(new SonivoxPlayerFactory(), SONIVOX_PLAYER);
     registerFactory_l(new TestPlayerFactory(), TEST_PLAYER);
+    registerFactory_l(new CedarAPlayerFactory(), CEDARA_PLAYER);
+    registerFactory_l(new CedarXPlayerFactory(), CEDARX_PLAYER);
 
     sInitComplete = true;
 }
