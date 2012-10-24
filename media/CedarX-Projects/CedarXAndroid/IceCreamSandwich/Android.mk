@@ -27,7 +27,7 @@ LOCAL_C_INCLUDES:= \
     $(TOP)/frameworks/${AV_BASE_PATH}/include \
     $(TOP)/external/openssl/include
     
-ifeq ($(PLATFORM_VERSION),4.1.1)
+ifeq ($(PLATFORM_VERSION),4.1.2)
     LOCAL_C_INCLUDES += $(TOP)/frameworks/native/include/media/hardware
 endif
 
@@ -43,7 +43,7 @@ LOCAL_SHARED_LIBRARIES := \
         libicuuc \
 		libskia 
 
-ifneq ($(PLATFORM_VERSION),4.1.1)
+ifneq ($(PLATFORM_VERSION),4.1.2)
 LOCAL_SHARED_LIBRARIES += libsurfaceflinger_client
 endif
 
