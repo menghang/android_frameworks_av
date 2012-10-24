@@ -25,10 +25,9 @@ LOCAL_C_INCLUDES:= \
     $(TOP)/frameworks/${AV_BASE_PATH}/media/libstagefright/include \
     $(TOP)/frameworks/${AV_BASE_PATH} \
     $(TOP)/frameworks/${AV_BASE_PATH}/include \
-    $(TOP)/external/openssl/include \
-    $(TOP)/frameworks/av/media/libstagefright/include
+    $(TOP)/external/openssl/include
     
-ifeq ($(PLATFORM_VERSION),4.1.2)
+ifeq ($(PLATFORM_VERSION),4.1.1)
     LOCAL_C_INCLUDES += $(TOP)/frameworks/native/include/media/hardware
 endif
 
@@ -44,7 +43,7 @@ LOCAL_SHARED_LIBRARIES := \
         libicuuc \
 		libskia 
 
-ifneq ($(PLATFORM_VERSION),4.1.2)
+ifneq ($(PLATFORM_VERSION),4.1.1)
 LOCAL_SHARED_LIBRARIES += libsurfaceflinger_client
 endif
 
