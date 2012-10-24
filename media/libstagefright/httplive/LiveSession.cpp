@@ -107,6 +107,10 @@ int64_t LiveSession::seekTo(int64_t timeUs) {
 
     while (mSeeking) {
         mCondition.wait(mLock);
+        if( newSeekTime != NULL ) {
+           *newSeekTime = mSeekTimeUs;
+           ALOGV("new Seek Time %lld", mSeekTimeUs);
+        }
     }
 
     return 0;
