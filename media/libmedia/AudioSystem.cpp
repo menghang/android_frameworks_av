@@ -411,6 +411,15 @@ void AudioSystem::releaseAudioSessionId(int audioSession) {
     }
 }
 
+#if defined(QCOM_HARDWARE) && defined(QCOM_FM_ENABLED)
+status_t AudioSystem::setFmVolume(float value)
+{
+    const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
+    if (af == 0) return PERMISSION_DENIED;
+    return af->setFmVolume(value);
+}
+#endif
+
 // ---------------------------------------------------------------------------
 
 void AudioSystem::AudioFlingerClient::binderDied(const wp<IBinder>& who) {
@@ -596,6 +605,14 @@ audio_io_handle_t AudioSystem::getOutput(audio_stream_type_t stream,
     return aps->getOutput(stream, samplingRate, format, channels, flags);
 }
 
+extern "C" audio_io_handle_t _ZN7android11AudioSystem9getOutputE19audio_stream_type_tjjj27audio_policy_output_flags_t(audio_stream_type_t stream,
+                                    uint32_t samplingRate,
+                                    uint32_t format,
+                                    uint32_t channels,
+                                    audio_output_flags_t flags) {
+    return AudioSystem::getOutput(stream,samplingRate,(audio_format_t) format, channels, flags);
+}
+
 status_t AudioSystem::startOutput(audio_io_handle_t output,
                                   audio_stream_type_t stream,
                                   int session)
@@ -752,5 +769,85 @@ void AudioSystem::AudioPolicyServiceClient::binderDied(const wp<IBinder>& who) {
 
     ALOGW("AudioPolicyService server died!");
 }
+
+#ifdef USE_SAMSUNG_SEPARATEDSTREAM
+extern "C" bool _ZN7android11AudioSystem17isSeparatedStreamE19audio_stream_type_t(audio_stream_type_t stream)
+{
+    ALOGD("android::AudioSystem::isSeparatedStream(audio_stream_type_t) called!");
+    ALOGD("audio_stream_type_t: %d", stream);
+
+/* this is the correct implementation, but breaks headset volume rocker.
+    if (stream == 3  || stream == 9  || stream == 10
+     || stream == 12 || stream == 13 || stream == 14)
+    {
+        LOGD("isSeparatedStream: true");
+        return true;
+    }
+*/
+
+    ALOGD("isSeparatedStream: false");
+    return false;
+}
+#endif // USE_SAMSUNG_SEPARATEDSTREAM
+
+#ifdef USES_AUDIO_LEGACY
+extern "C" uint32_t _ZN7android11AudioSystem8popCountEj(uint32_t u)
+{
+    return popcount(u);
+}
+
+extern "C" bool _ZN7android11AudioSystem12isA2dpDeviceENS0_13audio_devicesE(uint32_t device)
+{
+    return audio_is_a2dp_device((audio_devices_t)device);
+}
+
+extern "C" bool _ZN7android11AudioSystem13isInputDeviceENS0_13audio_devicesE(uint32_t device)
+{
+    return audio_is_input_device((audio_devices_t)device);
+}
+
+extern "C" bool _ZN7android11AudioSystem14isOutputDeviceENS0_13audio_devicesE(uint32_t device)
+{
+    return audio_is_output_device((audio_devices_t)device);
+}
+
+extern "C" bool _ZN7android11AudioSystem20isBluetoothScoDeviceENS0_13audio_devicesE(uint32_t device)
+{
+    return audio_is_bluetooth_sco_device((audio_devices_t)device);
+}
+
+extern "C" status_t _ZN7android11AudioSystem24setDeviceConnectionStateENS0_13audio_devicesENS0_23device_connection_stateEPKc(audio_devices_t device,
+                                               audio_policy_dev_state_t state,
+                                               const char *device_address) 
+{
+    return AudioSystem::setDeviceConnectionState(device, state, device_address);
+}
+
+extern "C" audio_io_handle_t _ZN7android11AudioSystem9getOutputENS0_11stream_typeEjjjNS0_12output_flagsE(audio_stream_type_t stream,
+                                    uint32_t samplingRate,
+                                    uint32_t format,
+                                    uint32_t channels,
+                                    audio_output_flags_t flags) 
+{
+   return AudioSystem::getOutput(stream,samplingRate,(audio_format_t)format,channels>>2,flags);
+}
+
+extern "C" bool _ZN7android11AudioSystem11isLinearPCMEj(uint32_t format)
+{
+    return audio_is_linear_pcm((audio_format_t)format);
+}
+
+extern "C" bool _ZN7android11AudioSystem15isLowVisibilityENS0_11stream_typeE(audio_stream_type_t stream)
+{
+    if (stream == AUDIO_STREAM_SYSTEM ||
+        stream == AUDIO_STREAM_NOTIFICATION ||
+        stream == AUDIO_STREAM_RING) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+#endif // AUDIO_LEGACY
 
 }; // namespace android

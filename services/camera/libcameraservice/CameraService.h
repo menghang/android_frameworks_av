@@ -23,7 +23,11 @@
 #include <hardware/camera.h>
 
 /* This needs to be increased if we can have more cameras */
+#ifdef OMAP_ENHANCEMENT
+#define MAX_CAMERAS 3
+#else
 #define MAX_CAMERAS 2
+#endif
 
 namespace android {
 
@@ -159,6 +163,9 @@ private:
         void                    handlePostview(const sp<IMemory>& mem);
         void                    handleRawPicture(const sp<IMemory>& mem);
         void                    handleCompressedPicture(const sp<IMemory>& mem);
+#if defined(OMAP_ICS_CAMERA) || defined(OMAP_ENHANCEMENT_BURST_CAPTURE)
+        void                    handleCompressedBurstPicture(const sp<IMemory>& mem);
+#endif
         void                    handleGenericNotify(int32_t msgType, int32_t ext1, int32_t ext2);
         void                    handleGenericData(int32_t msgType, const sp<IMemory>& dataPtr,
                                                   camera_frame_metadata_t *metadata);
@@ -187,6 +194,7 @@ private:
         int                             mPreviewCallbackFlag;
         int                             mOrientation;     // Current display orientation
         bool                            mPlayShutterSound;
+        bool                            mFaceDetection;
 
         // Ensures atomicity among the public methods
         mutable Mutex                   mLock;
@@ -225,6 +233,7 @@ private:
         // This function keeps trying to grab mLock, or give up if the message
         // is found to be disabled. It returns true if mLock is grabbed.
         bool                    lockIfMessageWanted(int32_t msgType);
+        int                     mburstCnt;
     };
 
     camera_module_t *mModule;

@@ -1,6 +1,7 @@
 /*
 **
 ** Copyright 2007, The Android Open Source Project
+** Copyright (c) 2012 Code Aurora Forum. All rights reserved.
 **
 ** Licensed under the Apache License, Version 2.0 (the "License");
 ** you may not use this file except in compliance with the License.
@@ -26,6 +27,10 @@
 
 #include <media/IAudioFlinger.h>
 #include <media/IAudioFlingerClient.h>
+#ifdef QCOM_HARDWARE
+#include <media/IDirectTrack.h>
+#include <media/IDirectTrackClient.h>
+#endif
 #include <media/IAudioTrack.h>
 #include <media/IAudioRecord.h>
 #include <media/AudioSystem.h>
@@ -52,6 +57,7 @@
 #include "AudioWatchdog.h"
 
 #include <powermanager/IPowerManager.h>
+#include <utils/List.h>
 
 namespace android {
 
@@ -99,6 +105,19 @@ public:
                                 pid_t tid,
                                 int *sessionId,
                                 status_t *status);
+#ifdef QCOM_HARDWARE
+    virtual sp<IDirectTrack> createDirectTrack(
+                                pid_t pid,
+                                uint32_t sampleRate,
+                                uint32_t channelMask,
+                                audio_io_handle_t output,
+                                int *sessionId,
+                                IDirectTrackClient* client,
+                                audio_stream_type_t streamType,
+                                status_t *status);
+
+    virtual void deleteEffectSession();
+#endif
 
     virtual sp<IAudioRecord> openRecord(
                                 pid_t pid,
@@ -142,6 +161,9 @@ public:
 
     virtual     void        registerClient(const sp<IAudioFlingerClient>& client);
 
+#ifdef QCOM_HARDWARE
+    virtual status_t deregisterClient(const sp<IAudioFlingerClient>& client);
+#endif
     virtual     size_t      getInputBufferSize(uint32_t sampleRate, audio_format_t format, int channelCount) const;
 
     virtual audio_io_handle_t openOutput(audio_module_handle_t module,
@@ -204,6 +226,10 @@ public:
     virtual status_t moveEffects(int sessionId, audio_io_handle_t srcOutput,
                         audio_io_handle_t dstOutput);
 
+#if defined(QCOM_HARDWARE) && defined(QCOM_FM_ENABLED)
+    virtual status_t setFmVolume(float volume);
+#endif
+
     virtual audio_module_handle_t loadHwModule(const char *name);
 
     virtual     status_t    onTransact(
@@ -211,6 +237,12 @@ public:
                                 const Parcel& data,
                                 Parcel* reply,
                                 uint32_t flags);
+
+#ifdef QCOM_HARDWARE
+    void applyEffectsOn(int16_t *buffer1,
+                        int16_t *buffer2,
+                        int size);
+#endif
 
     // end of IAudioFlinger interface
 
@@ -308,7 +340,11 @@ private:
     public:
                             NotificationClient(const sp<AudioFlinger>& audioFlinger,
                                                 const sp<IAudioFlingerClient>& client,
+#ifdef QCOM_HARDWARE
+                                                sp<IBinder> binder);
+#else
                                                 pid_t pid);
+#endif
         virtual             ~NotificationClient();
 
                 sp<IAudioFlingerClient> audioFlingerClient() const { return mAudioFlingerClient; }
@@ -321,7 +357,11 @@ private:
                             NotificationClient& operator = (const NotificationClient&);
 
         const sp<AudioFlinger>  mAudioFlinger;
+#ifdef QCOM_HARDWARE
+        sp<IBinder>             mBinder;
+#else
         const pid_t             mPid;
+#endif
         const sp<IAudioFlingerClient> mAudioFlingerClient;
     };
 
@@ -337,6 +377,9 @@ private:
     class EffectModule;
     class EffectHandle;
     class EffectChain;
+#ifdef QCOM_HARDWARE
+    struct AudioSessionDescriptor;
+#endif
     struct AudioStreamOut;
     struct AudioStreamIn;
 
@@ -382,6 +425,9 @@ private:
                                         audio_format_t format,
                                         uint32_t channelMask,
                                         int frameCount,
+#ifdef QCOM_HARDWARE
+                                        uint32_t flags,
+#endif
                                         const sp<IMemory>& sharedBuffer,
                                         int sessionId);
             virtual             ~TrackBase();
@@ -453,6 +499,9 @@ private:
                                 // support dynamic rates, the current value is in control block
             const audio_format_t mFormat;
             bool                mStepServerFailed;
+#ifdef QCOM_HARDWARE
+            uint32_t            mFlags;
+#endif
             const int           mSessionId;
             uint8_t             mChannelCount;
             uint32_t            mChannelMask;
@@ -498,6 +547,9 @@ private:
         virtual     status_t    setParameters(const String8& keyValuePairs);
         virtual     String8     getParameters(const String8& keys) = 0;
         virtual     void        audioConfigChanged_l(int event, int param = 0) = 0;
+#ifdef QCOM_HARDWARE
+                    void        effectConfigChanged();
+#endif
                     void        sendConfigEvent(int event, int param = 0);
                     void        sendConfigEvent_l(int event, int param = 0);
                     void        processConfigEvents();
@@ -1292,6 +1344,113 @@ private:
               sp<PlaybackThread> getEffectThread_l(int sessionId, int EffectId);
 
     // server side of the client's IAudioTrack
+#ifdef QCOM_HARDWARE
+    class DirectAudioTrack : public android::BnDirectTrack,
+                             public AudioEventObserver
+    {
+    public:
+                            DirectAudioTrack(const sp<AudioFlinger>& audioFlinger,
+                                             int output, AudioSessionDescriptor *outputDesc,
+                                             IDirectTrackClient* client, audio_output_flags_t outflag);
+        virtual             ~DirectAudioTrack();
+        virtual status_t    start();
+        virtual void        stop();
+        virtual void        flush();
+        virtual void        mute(bool);
+        virtual void        pause();
+        virtual ssize_t     write(const void *buffer, size_t bytes);
+        virtual void        setVolume(float left, float right);
+        virtual int64_t     getTimeStamp();
+        virtual void        postEOS(int64_t delayUs);
+
+        virtual status_t    onTransact(
+            uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags);
+    private:
+
+        IDirectTrackClient* mClient;
+        AudioSessionDescriptor *mOutputDesc;
+        int  mOutput;
+        bool mIsPaused;
+        void clearPowerManager();
+        class PMDeathRecipient : public IBinder::DeathRecipient {
+            public:
+                            PMDeathRecipient(void *obj){parentClass = (DirectAudioTrack *)obj;}
+                virtual     ~PMDeathRecipient() {}
+
+                // IBinder::DeathRecipient
+                virtual     void        binderDied(const wp<IBinder>& who);
+
+            private:
+                            DirectAudioTrack *parentClass;
+                            PMDeathRecipient(const PMDeathRecipient&);
+                            PMDeathRecipient& operator = (const PMDeathRecipient&);
+
+            friend class DirectAudioTrack;
+        };
+
+        friend class PMDeathRecipient;
+
+        Mutex pmLock;
+        void        acquireWakeLock();
+        void        releaseWakeLock();
+
+        sp<IPowerManager>       mPowerManager;
+        sp<IBinder>             mWakeLockToken;
+        sp<PMDeathRecipient>    mDeathRecipient;
+        audio_output_flags_t mFlag;
+
+        class BufferInfo {
+        public:
+            BufferInfo(void *buf1, void *buf2, int32_t nSize) :
+            localBuf(buf1), dspBuf(buf2), memBufsize(nSize)
+            {}
+
+            void *localBuf;
+            void *dspBuf;
+            uint32_t memBufsize;
+            uint32_t bytesToWrite;
+        };
+        List<BufferInfo> mBufPool;
+        List<BufferInfo> mEffectsPool;
+
+        void allocateBufPool();
+        void deallocateBufPool();
+
+        //******Effects*************
+        static void *EffectsThreadWrapper(void *me);
+        void EffectsThreadEntry();
+        // make sure the Effects thread also exited
+        void requestAndWaitForEffectsThreadExit();
+        void createEffectThread();
+        Condition mEffectCv;
+        Mutex mEffectLock;
+        pthread_t mEffectsThread;
+        bool mKillEffectsThread;
+        bool mEffectsThreadAlive;
+        bool mEffectConfigChanged;
+
+        //Structure to recieve the Effect notification from the flinger.
+        class AudioFlingerDirectTrackClient: public IBinder::DeathRecipient, public BnAudioFlingerClient {
+        public:
+            AudioFlingerDirectTrackClient(void *obj);
+
+            DirectAudioTrack *pBaseClass;
+            // DeathRecipient
+            virtual void binderDied(const wp<IBinder>& who);
+
+            // IAudioFlingerClient
+
+            // indicate a change in the configuration of an output or input: keeps the cached
+            // values for output/input parameters upto date in client process
+            virtual void ioConfigChanged(int event, audio_io_handle_t ioHandle, const void *param2);
+
+            friend class DirectAudioTrack;
+        };
+        // helper function to obtain AudioFlinger service handle
+        sp<AudioFlinger> mAudioFlinger;
+        sp<AudioFlingerDirectTrackClient> mAudioFlingerClient;
+    };
+#endif
     class TrackHandle : public android::BnAudioTrack {
     public:
                             TrackHandle(const sp<PlaybackThread::Track>& track);
@@ -1316,7 +1475,11 @@ private:
     };
 
                 void        removeClient_l(pid_t pid);
+#ifdef QCOM_HARDWARE
+                void        removeNotificationClient(sp<IBinder> binder);
+#else
                 void        removeNotificationClient(pid_t pid);
+#endif
 
 
     // record thread
@@ -1333,6 +1496,9 @@ private:
                                         audio_format_t format,
                                         uint32_t channelMask,
                                         int frameCount,
+#ifdef QCOM_HARDWARE
+                                        uint32_t flags,
+#endif
                                         int sessionId);
             virtual             ~RecordTrack();
 
@@ -1381,6 +1547,9 @@ private:
                         audio_format_t format,
                         int channelMask,
                         int frameCount,
+#ifdef QCOM_HARDWARE
+                        uint32_t flags,
+#endif
                         int sessionId,
                         status_t *status);
 
@@ -1437,6 +1606,9 @@ private:
                 // when < 0, maximum frames to drop before starting capture even if sync event is
                 // not received
                 ssize_t                             mFramestoDrop;
+#ifdef QCOM_HARDWARE
+                int16_t                             mInputSource;
+#endif
     };
 
     // server side of the client's IAudioRecord
@@ -1498,7 +1670,14 @@ private:
                          void *pReplyData);
 
         void reset_l();
+#ifdef QCOM_HARDWARE
+        status_t configure(bool isForLPA = false,
+                           int sampleRate = 0,
+                           int channelCount = 0,
+                           int frameCount = 0);
+#else
         status_t configure();
+#endif
         status_t init();
         effect_state state() const {
             return mState;
@@ -1541,6 +1720,10 @@ private:
         bool             isPinned() const { return mPinned; }
         void             unPin() { mPinned = false; }
 
+#ifdef QCOM_HARDWARE
+        bool             isOnLPA() { return mIsForLPA;}
+        void             setLPAFlag(bool isForLPA) {mIsForLPA = isForLPA; }
+#endif
         status_t         dump(int fd, const Vector<String16>& args);
 
     protected:
@@ -1572,6 +1755,9 @@ mutable Mutex               mLock;      // mutex for process, commands and handl
                                         // sending disable command.
         uint32_t mDisableWaitCnt;       // current process() calls count during disable period.
         bool     mSuspended;            // effect is suspended: temporarily disabled by framework
+#ifdef QCOM_HARDWARE
+        bool     mIsForLPA;
+#endif
     };
 
     // The EffectHandle class implements the IEffect interface. It provides resources
@@ -1676,12 +1862,17 @@ mutable Mutex               mLock;      // mutex for process, commands and handl
 
         status_t addEffect_l(const sp<EffectModule>& handle);
         size_t removeEffect_l(const sp<EffectModule>& handle);
-
+#ifdef QCOM_HARDWARE
+        size_t getNumEffects() { return mEffects.size(); }
+#endif
         int sessionId() const { return mSessionId; }
         void setSessionId(int sessionId) { mSessionId = sessionId; }
 
         sp<EffectModule> getEffectFromDesc_l(effect_descriptor_t *descriptor);
         sp<EffectModule> getEffectFromId_l(int id);
+#ifdef QCOM_HARDWARE
+        sp<EffectModule> getEffectFromIndex_l(int idx);
+#endif
         sp<EffectModule> getEffectFromType_l(const effect_uuid_t *type);
         bool setVolume_l(uint32_t *left, uint32_t *right);
         void setDevice_l(uint32_t device);
@@ -1726,6 +1917,10 @@ mutable Mutex               mLock;      // mutex for process, commands and handl
         void clearInputBuffer();
 
         status_t dump(int fd, const Vector<String16>& args);
+#ifdef QCOM_HARDWARE
+        bool isForLPATrack() {return mIsForLPATrack; }
+        void setLPAFlag(bool flag) {mIsForLPATrack = flag;}
+#endif
 
     protected:
         friend class AudioFlinger;  // for mThread, mEffects
@@ -1771,6 +1966,9 @@ mutable Mutex               mLock;      // mutex for process, commands and handl
         uint32_t mNewLeftVolume;       // new volume on left channel
         uint32_t mNewRightVolume;      // new volume on right channel
         uint32_t mStrategy; // strategy for this effect chain
+#ifdef QCOM_HARDWARE
+        bool     mIsForLPATrack;
+#endif
         // mSuspendedEffects lists all effects currently suspended in the chain.
         // Use effect type UUID timelow field as key. There is no real risk of identical
         // timeLow fields among effect type UUIDs.
@@ -1797,6 +1995,20 @@ mutable Mutex               mLock;      // mutex for process, commands and handl
         AudioStreamIn(audio_hw_device_t *dev, audio_stream_in_t *in) :
             hwDev(dev), stream(in) {}
     };
+
+#ifdef QCOM_HARDWARE
+    struct AudioSessionDescriptor {
+        bool    mActive;
+        int     mStreamType;
+        float   mVolumeLeft;
+        float   mVolumeRight;
+        audio_hw_device_t   *hwDev;
+        audio_stream_out_t  *stream;
+        audio_output_flags_t flag;
+        AudioSessionDescriptor(audio_hw_device_t *dev, audio_stream_out_t *out, audio_output_flags_t outflag) :
+            hwDev(dev), stream(out), flag(outflag)  {}
+    };
+#endif
 
     // for mAudioSessionRefs only
     struct AudioSessionRef {
@@ -1872,6 +2084,9 @@ mutable Mutex               mLock;      // mutex for process, commands and handl
         AUDIO_HW_SET_MIC_MUTE,          // set_mic_mute
         AUDIO_HW_SET_VOICE_VOLUME,      // set_voice_volume
         AUDIO_HW_SET_PARAMETER,         // set_parameters
+#if defined(QCOM_HARDWARE) && defined(QCOM_FM_ENABLED)
+        AUDIO_SET_FM_VOLUME,
+#endif
         AUDIO_HW_GET_INPUT_BUFFER_SIZE, // get_input_buffer_size
         AUDIO_HW_GET_MASTER_VOLUME,     // get_master_volume
         AUDIO_HW_GET_PARAMETER,         // get_parameters
@@ -1891,14 +2106,29 @@ mutable Mutex               mLock;      // mutex for process, commands and handl
 
                 DefaultKeyedVector< audio_io_handle_t, sp<RecordThread> >    mRecordThreads;
 
+#ifdef QCOM_HARDWARE
+                DefaultKeyedVector< sp<IBinder>, sp<NotificationClient> >    mNotificationClients;
+#else
                 DefaultKeyedVector< pid_t, sp<NotificationClient> >    mNotificationClients;
+#endif
                 volatile int32_t                    mNextUniqueId;  // updated by android_atomic_inc
                 audio_mode_t                        mMode;
                 bool                                mBtNrecIsOff;
+#ifdef QCOM_HARDWARE
+                DefaultKeyedVector<audio_io_handle_t, AudioSessionDescriptor *> mDirectAudioTracks;
+                int                                 mA2DPHandle; // Handle to notify A2DP connection status
 
                 // protected by mLock
+                volatile bool                       mIsEffectConfigChanged;
+#endif
                 Vector<AudioSessionRef*> mAudioSessionRefs;
-
+#ifdef QCOM_HARDWARE
+                sp<EffectChain> mLPAEffectChain;
+                int         mLPASessionId;
+                int                                 mLPASampleRate;
+                int                                 mLPANumChannels;
+                volatile bool                       mAllChainsLocked;
+#endif
                 float       masterVolume_l() const;
                 float       masterVolumeSW_l() const  { return mMasterVolumeSW; }
                 bool        masterMute_l() const    { return mMasterMute; }

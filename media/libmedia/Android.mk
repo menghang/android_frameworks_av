@@ -9,6 +9,21 @@ LOCAL_MODULE_TAGS := optional
 
 include $(BUILD_STATIC_LIBRARY)
 
+
+#ifeq ($(BOARD_USES_SRS_TRUEMEDIA),true)
+
+include $(CLEAR_VARS)
+
+LOCAL_SRC_FILES:= AudioParameter.cpp
+LOCAL_MODULE:= libaudioparameter
+LOCAL_MODULE_TAGS := optional
+LOCAL_SHARED_LIBRARIES := libutils
+
+include $(BUILD_SHARED_LIBRARY)
+
+#endif
+
+
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES:= \
@@ -48,12 +63,38 @@ LOCAL_SRC_FILES:= \
     SoundPool.cpp \
     SoundPoolThread.cpp
 
+ifeq ($(BOARD_USES_LIBMEDIA_WITH_AUDIOPARAMETER),true)
+    LOCAL_SRC_FILES+= \
+        AudioParameter.cpp
+endif
+
+ifeq ($(BOARD_USE_SAMSUNG_SEPARATEDSTREAM),true)
+    LOCAL_CFLAGS += -DUSE_SAMSUNG_SEPARATEDSTREAM
+endif
+
+ifeq ($(BOARD_USES_QCOM_HARDWARE),true)
+	LOCAL_SRC_FILES += \
+		IDirectTrack.cpp \
+ 		IDirectTrackClient.cpp
+endif
+
 LOCAL_SHARED_LIBRARIES := \
 	libui libcutils libutils libbinder libsonivox libicuuc libexpat \
         libcamera_client libstagefright_foundation \
         libgui libdl libaudioutils libmedia_native
 
 LOCAL_WHOLE_STATIC_LIBRARY := libmedia_helper
+
+ifeq ($(BOARD_USES_AUDIO_LEGACY),true)
+    LOCAL_SRC_FILES+= \
+        AudioParameter.cpp
+
+    LOCAL_CFLAGS += -DUSES_AUDIO_LEGACY
+endif
+
+ifeq ($(BOARD_USE_KINETO_COMPATIBILITY),true)
+    LOCAL_CFLAGS += -DUSE_KINETO_COMPATIBILITY
+endif
 
 LOCAL_MODULE:= libmedia
 

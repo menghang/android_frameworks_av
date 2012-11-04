@@ -74,6 +74,7 @@
 
 #include "Crypto.h"
 
+#define DEFAULT_SAMPLE_RATE 44100
 namespace android {
 sp<MediaPlayerBase> createAAH_TXPlayer();
 sp<MediaPlayerBase> createAAH_RXPlayer();
@@ -788,7 +789,9 @@ player_type getPlayerType(const char* url)
         if (len >= 5 && !strcasecmp(".m3u8", &url[len - 5])) {
             return NU_PLAYER;
         }
-
+        if(len >= 4 && !strcasecmp(".mpd", &url[len - 4])){
+            return NU_PLAYER;
+        }
         if (strstr(url,"m3u8")) {
             return NU_PLAYER;
         }
@@ -2557,6 +2560,22 @@ status_t MediaPlayerService::AudioOutput::getPosition(uint32_t *position) const
     return mTrack->getPosition(position);
 }
 
+#ifdef QCOM_HARDWARE
+ssize_t MediaPlayerService::AudioOutput::sampleRate() const
+{
+    if (mTrack == 0) return NO_INIT;
+    return DEFAULT_SAMPLE_RATE;
+}
+
+status_t MediaPlayerService::AudioOutput::getTimeStamp(uint64_t *tstamp)
+{
+    if (tstamp == 0) return BAD_VALUE;
+    if (mTrack == 0) return NO_INIT;
+    mTrack->getTimeStamp(tstamp);
+    return NO_ERROR;
+}
+#endif
+
 status_t MediaPlayerService::AudioOutput::getFramesWritten(uint32_t *frameswritten) const
 {
     if (mTrack == 0) return NO_INIT;
@@ -2573,6 +2592,60 @@ status_t MediaPlayerService::AudioOutput::open(
     mCallback = cb;
     mCallbackCookie = cookie;
 
+#ifdef QCOM_HARDWARE
+    if (flags & AUDIO_OUTPUT_FLAG_LPA || flags & AUDIO_OUTPUT_FLAG_TUNNEL) {
+        ALOGV("AudioOutput open: with flags %x",flags);
+        channelMask = audio_channel_out_mask_from_count(channelCount);
+        if (0 == channelMask) {
+            ALOGE("open() error, can't derive mask for %d audio channels", channelCount);
+            return NO_INIT;
+        }
+        AudioTrack *t;
+        CallbackData *newcbd = NULL;
+        if (mCallback != NULL) {
+            newcbd = new CallbackData(this);
+            t = new AudioTrack(
+                    mStreamType,
+                    sampleRate,
+                    format,
+                    channelMask,
+                    0,
+                    flags,
+                    CallbackWrapper,
+                    newcbd,
+                    0,
+                    mSessionId);
+            if ((t == 0) || (t->initCheck() != NO_ERROR)) {
+                ALOGE("Unable to create audio track");
+                delete t;
+                delete newcbd;
+                return NO_INIT;
+            }
+        }
+
+        if (mRecycledTrack) {
+            //usleep(500000);
+            // if we're not going to reuse the track, unblock and flush it
+            if (mCallbackData != NULL) {
+                mCallbackData->setOutput(NULL);
+                mCallbackData->endTrackSwitch();
+            }
+            mRecycledTrack->flush();
+            delete mRecycledTrack;
+            mRecycledTrack = NULL;
+            delete mCallbackData;
+            mCallbackData = NULL;
+            close();
+        }
+        ALOGV("setVolume");
+        mCallbackData = newcbd;
+        t->setVolume(mLeftVolume, mRightVolume);
+        mSampleRateHz = sampleRate;
+        mFlags = flags;
+        mTrack = t;
+        return NO_ERROR;
+    }
+#endif
     // Check argument "bufferCount" against the mininum buffer count
     if (bufferCount < mMinBufferCount) {
         ALOGD("bufferCount (%d) is too small and increased to %d", bufferCount, mMinBufferCount);
@@ -2672,7 +2745,7 @@ status_t MediaPlayerService::AudioOutput::open(
             delete newcbd;
             return OK;
         }
-
+        //usleep(500000);
         // if we're not going to reuse the track, unblock and flush it
         if (mCallbackData != NULL) {
             mCallbackData->setOutput(NULL);
@@ -2735,6 +2808,9 @@ void MediaPlayerService::AudioOutput::switchToNextOutput() {
         mNextOutput->mCallbackData = mCallbackData;
         mCallbackData = NULL;
         mNextOutput->mRecycledTrack = mTrack;
+#ifdef QCOM_HARDWARE
+        mTrack->stop();
+#endif
         mTrack = NULL;
         mNextOutput->mSampleRateHz = mSampleRateHz;
         mNextOutput->mMsecsPerFrame = mMsecsPerFrame;
@@ -2745,8 +2821,9 @@ void MediaPlayerService::AudioOutput::switchToNextOutput() {
 
 ssize_t MediaPlayerService::AudioOutput::write(const void* buffer, size_t size)
 {
+#ifndef QCOM_HARDWARE
     LOG_FATAL_IF(mCallback != NULL, "Don't call write if supplying a callback.");
-
+#endif
     //ALOGV("write(%p, %u)", buffer, size);
     if (mTrack) {
         ssize_t ret = mTrack->write(buffer, size);
@@ -2831,35 +2908,56 @@ status_t MediaPlayerService::AudioOutput::attachAuxEffect(int effectId)
 void MediaPlayerService::AudioOutput::CallbackWrapper(
         int event, void *cookie, void *info) {
     //ALOGV("callbackwrapper");
-    if (event != AudioTrack::EVENT_MORE_DATA) {
-        return;
-    }
-
-    CallbackData *data = (CallbackData*)cookie;
-    data->lock();
-    AudioOutput *me = data->getOutput();
-    AudioTrack::Buffer *buffer = (AudioTrack::Buffer *)info;
-    if (me == NULL) {
-        // no output set, likely because the track was scheduled to be reused
-        // by another player, but the format turned out to be incompatible.
+#ifdef QCOM_HARDWARE
+    if (event == AudioTrack::EVENT_UNDERRUN) {
+        ALOGW("Event underrun");
+        CallbackData *data = (CallbackData*)cookie;
+        data->lock();
+        AudioOutput *me = data->getOutput();
+        if (me == NULL) {
+            // no output set, likely because the track was scheduled to be reused
+            // by another player, but the format turned out to be incompatible.
+            data->unlock();
+            return;
+        }
+        ALOGD("Callback!!!");
+        (*me->mCallback)(
+            me, NULL, (size_t)AudioTrack::EVENT_UNDERRUN, me->mCallbackCookie);
         data->unlock();
-        buffer->size = 0;
         return;
     }
+#endif
+    if (event == AudioTrack::EVENT_MORE_DATA) {
+        CallbackData *data = (CallbackData*)cookie;
+        data->lock();
+        AudioOutput *me = data->getOutput();
+        AudioTrack::Buffer *buffer = (AudioTrack::Buffer *)info;
+        if (me == NULL) {
+            // no output set, likely because the track was scheduled to be reused
+            // by another player, but the format turned out to be incompatible.
+            data->unlock();
+            buffer->size = 0;
+            return;
+        }
 
-    size_t actualSize = (*me->mCallback)(
-            me, buffer->raw, buffer->size, me->mCallbackCookie);
+        size_t actualSize = (*me->mCallback)(
+                me, buffer->raw, buffer->size, me->mCallbackCookie);
 
-    if (actualSize == 0 && buffer->size > 0 && me->mNextOutput == NULL) {
-        // We've reached EOS but the audio track is not stopped yet,
-        // keep playing silence.
+        if (actualSize == 0 && buffer->size > 0 && me->mNextOutput == NULL) {
+            // We've reached EOS but the audio track is not stopped yet,
+            // keep playing silence.
 
-        memset(buffer->raw, 0, buffer->size);
-        actualSize = buffer->size;
+            memset(buffer->raw, 0, buffer->size);
+            actualSize = buffer->size;
+        }
+
+        buffer->size = actualSize;
+        data->unlock();
     }
 
-    buffer->size = actualSize;
-    data->unlock();
+    return;
+
+
 }
 
 int MediaPlayerService::AudioOutput::getSessionId() const
@@ -2893,6 +2991,13 @@ status_t MediaPlayerService::AudioCache::getPosition(uint32_t *position) const
     *position = mSize;
     return NO_ERROR;
 }
+
+#ifdef QCOM_HARDWARE
+ssize_t MediaPlayerService::AudioCache::sampleRate() const
+{
+    return mSampleRate;
+}
+#endif
 
 status_t MediaPlayerService::AudioCache::getFramesWritten(uint32_t *written) const
 {

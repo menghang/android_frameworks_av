@@ -1,6 +1,7 @@
 /*
  **
  ** Copyright 2010, The Android Open Source Project.
+ ** Copyright (c) 2012, Code Aurora Forum. All rights reserved.
  **
  ** Licensed under the Apache License, Version 2.0 (the "License");
  ** you may not use this file except in compliance with the License.
@@ -32,8 +33,13 @@ enum camcorder_quality {
     CAMCORDER_QUALITY_480P = 4,
     CAMCORDER_QUALITY_720P = 5,
     CAMCORDER_QUALITY_1080P = 6,
-    CAMCORDER_QUALITY_QVGA = 7,
-    CAMCORDER_QUALITY_LIST_END = 7,
+    CAMCORDER_QUALITY_QVGA = 11,
+    CAMCORDER_QUALITY_FWVGA = 7,
+    CAMCORDER_QUALITY_WVGA = 8,
+    CAMCORDER_QUALITY_VGA = 9,
+    CAMCORDER_QUALITY_WQVGA = 10,
+
+    CAMCORDER_QUALITY_LIST_END = 11,
 
     CAMCORDER_QUALITY_TIME_LAPSE_LIST_START = 1000,
     CAMCORDER_QUALITY_TIME_LAPSE_LOW  = 1000,
@@ -456,6 +462,9 @@ private:
     static VideoEncoderCap* createDefaultH263VideoEncoderCap();
     static VideoEncoderCap* createDefaultM4vVideoEncoderCap();
     static AudioEncoderCap* createDefaultAmrNBEncoderCap();
+#ifdef QCOM_HARDWARE
+    static AudioEncoderCap* createDefaultAacEncoderCap();
+#endif
 
     static int findTagForName(const NameToTagMap *map, size_t nMappings, const char *name);
 

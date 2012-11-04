@@ -1,6 +1,7 @@
 /*
 **
 ** Copyright 2008, The Android Open Source Project
+** Copyright (c) 2012, Code Aurora Forum. All rights reserved.
 **
 ** Licensed under the Apache License, Version 2.0 (the "License");
 ** you may not use this file except in compliance with the License.
@@ -101,6 +102,38 @@ AudioRecord::AudioRecord(
             frameCount, flags, cbf, user, notificationFrames, sessionId);
 }
 
+#ifdef USE_KINETO_COMPATIBILITY
+// Really dirty hack to give a Froyo-compatible constructor
+extern "C" AudioRecord *_ZN7android11AudioRecordC1EijijijPFviPvS1_ES1_ii(
+        AudioRecord *This,
+        int inputSource,
+        uint32_t sampleRate,
+        int format,
+        uint32_t channels,
+        int frameCount,
+        uint32_t flags,
+        AudioRecord::callback_t cbf,
+        void* user,
+        int notificationFrames,
+        int sessionId);
+extern "C" AudioRecord *_ZN7android11AudioRecordC1EijijijPFviPvS1_ES1_i(
+        AudioRecord *This,
+        int inputSource,
+        uint32_t sampleRate,
+        int format,
+        uint32_t channels,
+        int frameCount,
+        uint32_t flags,
+        AudioRecord::callback_t cbf,
+        void* user,
+        int notificationFrames)
+{
+    return _ZN7android11AudioRecordC1EijijijPFviPvS1_ES1_ii(This,
+        inputSource, sampleRate, format, channels,
+        frameCount, flags, cbf, user, notificationFrames, 0);
+}
+#endif
+
 AudioRecord::~AudioRecord()
 {
     if (mStatus == NO_ERROR) {
@@ -161,7 +194,11 @@ status_t AudioRecord::set(
         return BAD_VALUE;
     }
 
+#ifdef QCOM_HARDWARE
+    int channelCount = popcount((channelMask) & (AUDIO_CHANNEL_IN_STEREO | AUDIO_CHANNEL_IN_MONO));
+#else
     int channelCount = popcount(channelMask);
+#endif
 
     if (sessionId == 0 ) {
         mSessionId = AudioSystem::newAudioSessionId();
@@ -181,14 +218,61 @@ status_t AudioRecord::set(
         return BAD_VALUE;
     }
 
-    // validate framecount
+#ifdef QCOM_HARDWARE
+    size_t inputBuffSizeInBytes = -1;
+    if (AudioSystem::getInputBufferSize(sampleRate, format, channelCount, &inputBuffSizeInBytes)
+            != NO_ERROR) {
+        ALOGE("AudioSystem could not query the input buffer size.");
+        return NO_INIT;
+    }
+    ALOGV("AudioRecord::set() inputBuffSizeInBytes = %d", inputBuffSizeInBytes );
+
+    if (inputBuffSizeInBytes == 0) {
+        ALOGE("Recording parameters are not supported: sampleRate %d, channelCount %d, format %d",
+            sampleRate, channelCount, format);
+        return BAD_VALUE;
+    }
+
+    mFirstread = false;
+    // Change for Codec type
+    int frameSizeInBytes = 0;
+    if(inputSource == AUDIO_SOURCE_VOICE_COMMUNICATION) {
+        if (audio_is_linear_pcm(format)) {
+             frameSizeInBytes = channelCount * (format == AUDIO_FORMAT_PCM_16_BIT ? sizeof(int16_t) 
+: sizeof(int8_t));
+        } else {
+             frameSizeInBytes = channelCount *sizeof(int16_t);
+        }
+        mFirstread = true;
+    } else {
+        if (format ==AUDIO_FORMAT_AMR_NB) {
+             frameSizeInBytes = channelCount * 32; // Full rate framesize
+        } else if (format ==AUDIO_FORMAT_EVRC) {
+             frameSizeInBytes = channelCount * 23; // Full rate framesize
+        } else if (format ==AUDIO_FORMAT_QCELP) {
+             frameSizeInBytes = channelCount * 35; // Full rate framesize
+        } else if (format ==AUDIO_FORMAT_AAC) {
+             frameSizeInBytes = 2048;
+        } else if ((format ==AUDIO_FORMAT_PCM_16_BIT) || (format ==AUDIO_FORMAT_PCM_8_BIT)) {
+             if (audio_is_linear_pcm(format)) {
+                  frameSizeInBytes = channelCount * (format == AUDIO_FORMAT_PCM_16_BIT ? sizeof(int16_t) : sizeof(int8_t));
+             } else {
+                  frameSizeInBytes = sizeof(int8_t);
+             }
+             mFirstread = true;
+        }
+    }
+    // We use 2* size of input buffer for ping pong use of record buffer.
+    int minFrameCount = 2 * inputBuffSizeInBytes / frameSizeInBytes;
+#else
     int minFrameCount = 0;
     status_t status = getMinFrameCount(&minFrameCount, sampleRate, format, channelCount);
     if (status != NO_ERROR) {
         return status;
     }
-    ALOGV("AudioRecord::set() minFrameCount = %d", minFrameCount);
+#endif
 
+    ALOGV("AudioRecord::set() minFrameCount = %d", minFrameCount);
     if (frameCount == 0) {
         frameCount = minFrameCount;
     } else if (frameCount < minFrameCount) {
@@ -199,9 +283,16 @@ status_t AudioRecord::set(
         notificationFrames = frameCount/2;
     }
 
+    mInputSource = inputSource;
     // create the IAudioRecord
+#ifdef QCOM_HARDWARE
+    status_t status = openRecord_l(sampleRate, format, channelMask,
+                        frameCount, flags, input);
+#else
     status = openRecord_l(sampleRate, format, channelMask,
                         frameCount, input);
+#endif
+
     if (status != NO_ERROR) {
         return status;
     }
@@ -228,9 +319,11 @@ status_t AudioRecord::set(
     mMarkerReached = false;
     mNewPosition = 0;
     mUpdatePeriod = 0;
-    mInputSource = inputSource;
     mFlags = flags;
     mInput = input;
+#ifdef QCOM_HARDWARE
+    mFirstread = false;
+#endif
     AudioSystem::acquireAudioSessionId(mSessionId);
 
     return NO_ERROR;
@@ -265,11 +358,34 @@ uint32_t AudioRecord::frameCount() const
 
 size_t AudioRecord::frameSize() const
 {
-    if (audio_is_linear_pcm(mFormat)) {
-        return channelCount()*audio_bytes_per_sample(mFormat);
+#ifdef QCOM_HARDWARE
+    if(inputSource() == AUDIO_SOURCE_VOICE_COMMUNICATION) {
+        if (audio_is_linear_pcm(mFormat)) {
+             return channelCount()*audio_bytes_per_sample(mFormat);
+        } else {
+            return channelCount()*sizeof(int16_t);
+        }
     } else {
-        return sizeof(uint8_t);
+        if (format() ==AUDIO_FORMAT_AMR_NB) {
+            return channelCount() * 32; // Full rate framesize
+        } else if (format() == AUDIO_FORMAT_EVRC) {
+            return channelCount() * 23; // Full rate framesize
+        } else if (format() == AUDIO_FORMAT_QCELP) {
+            return channelCount() * 35; // Full rate framesize
+        } else if (format() == AUDIO_FORMAT_AAC) {
+            // Not actual framsize but for variable frame rate AAC encoding,
+            // buffer size is treated as a frame size
+            return 2048;
+        }
+#endif
+        if (audio_is_linear_pcm(mFormat)) {
+            return channelCount()*audio_bytes_per_sample(mFormat);
+        } else {
+            return sizeof(uint8_t);
+        }
+#ifdef QCOM_HARDWARE
     }
+#endif
 }
 
 audio_source_t AudioRecord::inputSource() const
@@ -459,6 +575,9 @@ status_t AudioRecord::openRecord_l(
         audio_format_t format,
         uint32_t channelMask,
         int frameCount,
+#ifdef QCOM_HARDWARE
+        uint32_t flags,
+#endif
         audio_io_handle_t input)
 {
     status_t status;
@@ -471,7 +590,12 @@ status_t AudioRecord::openRecord_l(
                                                        sampleRate, format,
                                                        channelMask,
                                                        frameCount,
+#ifdef QCOM_HARDWARE
+                                                       (((uint16_t)flags) << 16 |
+                                                       ((int16_t)(inputSource()))),
+#else
                                                        IAudioFlinger::TRACK_DEFAULT,
+#endif
                                                        &mSessionId,
                                                        &status);
 
@@ -584,6 +708,7 @@ create_new_record:
         framesReq = bufferEnd - u;
     }
 
+
     audioBuffer->flags       = 0;
     audioBuffer->channelCount= mChannelCount;
     audioBuffer->format      = mFormat;
@@ -648,7 +773,6 @@ ssize_t AudioRecord::read(void* buffer, size_t userSize)
     do {
 
         audioBuffer.frameCount = userSize/frameSize();
-
         // By using a wait count corresponding to twice the timeout period in
         // obtainBuffer() we give a chance to recover once for a read timeout
         // (if media_server crashed for instance) before returning a length of
@@ -671,6 +795,13 @@ ssize_t AudioRecord::read(void* buffer, size_t userSize)
         read += bytesRead;
 
         releaseBuffer(&audioBuffer);
+#ifdef QCOM_HARDWARE
+        if(!mFirstread)
+        {
+           mFirstread = true;
+           break;
+        }
+#endif
     } while (userSize);
 
     return read;
@@ -743,6 +874,13 @@ bool AudioRecord::processAudioBuffer(const sp<ClientRecordThread>& thread)
         frames -= audioBuffer.frameCount;
 
         releaseBuffer(&audioBuffer);
+#ifdef QCOM_HARDWARE
+        if(!mFirstread)
+        {
+           mFirstread = true;
+           break;
+        }
+#endif
 
     } while (frames);
 
@@ -781,7 +919,11 @@ status_t AudioRecord::restoreRecord_l(audio_track_cblk_t*& cblk)
         // following member variables: mAudioRecord, mCblkMemory and mCblk.
         // It will also delete the strong references on previous IAudioRecord and IMemory
         result = openRecord_l(cblk->sampleRate, mFormat, mChannelMask,
-                mFrameCount, getInput_l());
+                mFrameCount,
+#ifdef QCOM_HARDWARE
+                0,
+#endif
+                getInput_l());
         if (result == NO_ERROR) {
             // callback thread or sync event hasn't changed
             result = mAudioRecord->start(AudioSystem::SYNC_EVENT_SAME, 0);
