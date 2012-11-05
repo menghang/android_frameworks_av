@@ -98,7 +98,7 @@ void LiveSession::disconnect() {
 }
 
 
-int64_t LiveSession::seekTo(int64_t timeUs, int64_t* newSeekTime ) {
+int64_t LiveSession::seekTo(int64_t timeUs) {
     Mutex::Autolock autoLock(mLock);
     mSeeking = true;
 
@@ -108,14 +108,10 @@ int64_t LiveSession::seekTo(int64_t timeUs, int64_t* newSeekTime ) {
 
     while (mSeeking) {
         mCondition.wait(mLock);
-        if( newSeekTime != NULL ) {
-           *newSeekTime = mSeekTimeUs;
-           ALOGV("new Seek Time %lld", mSeekTimeUs);
-        }
+        
     }
 
-    mSeekTimeUs = -1;
-	return 0;
+    return 0;
 }
 
 void LiveSession::setCurrentPlayingTime(int64_t curPlayTime) {

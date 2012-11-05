@@ -47,7 +47,7 @@ struct LiveSession : public AHandler {
 
 
     // Blocks until seek is complete.
-    int64_t seekTo(int64_t timeUs, int64_t* newSeekTime = NULL);
+    int64_t seekTo(int64_t timeUs);
 
     status_t getDuration(int64_t *durationUs);
     bool isSeekable();
