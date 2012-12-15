@@ -25,6 +25,8 @@
 
 #include <system/audio.h>
 
+#include <CedarXRecorder.h>
+
 namespace android {
 
 class Camera;
@@ -67,6 +69,8 @@ struct StagefrightRecorder : public MediaRecorderBase {
     virtual status_t dump(int fd, const Vector<String16>& args) const;
     // Querying a SurfaceMediaSourcer
     virtual sp<ISurfaceTexture> querySurfaceMediaSource() const;
+    virtual status_t queueBuffer(int index, int addr_y, int addr_c, int64_t timestamp);
+    virtual	sp<IMemory> getOneBsFrame(int mode);
 
 private:
     sp<ICamera> mCamera;
@@ -75,6 +79,7 @@ private:
     sp<IMediaRecorderClient> mListener;
     sp<MediaWriter> mWriter;
     int mOutputFd;
+    char *mOutputPath;
     sp<AudioSource> mAudioSourceNode;
 
     audio_source_t mAudioSource;
@@ -188,6 +193,9 @@ private:
     void clipNumberOfAudioChannels();
     void setDefaultProfileIfNecessary();
 
+private:	
+	CedarXRecorder * mpCedarXRecorder;
+	bool			 mbHWEncoder;
 
     StagefrightRecorder(const StagefrightRecorder &);
     StagefrightRecorder &operator=(const StagefrightRecorder &);
